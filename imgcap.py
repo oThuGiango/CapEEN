@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Image Captioning with Early Exit (CapEEN)
 # Encoder : Swin-Base  |  Decoder : GPT-2  |  Dataset : COCO train2014 + val2017
 # Hardware : NVIDIA Jetson AGX Orin 64 GB  |  CUDA 12.6 / JetPack 6
@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
@@ -505,6 +505,11 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
 
     encoder_outputs = model_ved.encoder(pixel_values=pixel_values, return_dict=True)
     encoder_hidden_states = encoder_outputs.last_hidden_state
+
+    # Align encoder hidden size to decoder hidden size when they differ (e.g., Swin-Base 1024 -> GPT-2 768).
+    if hasattr(model_ved, "enc_to_dec_proj") and model_ved.enc_to_dec_proj is not None:
+        encoder_hidden_states = model_ved.enc_to_dec_proj(encoder_hidden_states)
+
     encoder_attention_mask = torch.ones(
         encoder_hidden_states.shape[:2],
         dtype=torch.long,
@@ -614,7 +619,7 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
         pixel_values = batch["pixel_values"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
 
-        with autocast(enabled=device.type == "cuda"):
+        with autocast(device_type="cuda", enabled=device.type == "cuda"):
             outputs = model(pixel_values=pixel_values, labels=labels, output_hidden_states=True)
             loss = outputs.loss
 
@@ -650,7 +655,7 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
         for batch in tqdm(valid_loader, desc=f"Baseline Valid E{epoch}"):
             pixel_values = batch["pixel_values"].to(device, non_blocking=True)
             label_ids = batch["labels"].to(device, non_blocking=True)
-            with autocast(enabled=device.type == "cuda"):
+            with autocast(device_type="cuda", enabled=device.type == "cuda"):
                 outputs = model(pixel_values=pixel_values, labels=label_ids, output_hidden_states=True)
                 valid_loss_sum += float(outputs.loss.item())
 
@@ -803,7 +808,7 @@ for epoch in range(1, num_epochs_exit + 1):
         pixel_values = batch["pixel_values"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
 
-        with autocast(enabled=device.type == "cuda"):
+        with autocast(device_type="cuda", enabled=device.type == "cuda"):
             # best_model frozen, chỉ lấy hidden states làm input cho các head
             outputs = best_model(pixel_values=pixel_values, labels=labels, output_hidden_states=True)
             layer_states = get_decoder_layer_states(outputs.decoder_hidden_states, decoder_num_layers)
@@ -863,7 +868,7 @@ for epoch in range(1, num_epochs_exit + 1):
         for batch in tqdm(valid_loader_exit, desc=f"Exit Valid E{epoch}"):
             pixel_values = batch["pixel_values"].to(device, non_blocking=True)
             label_ids = batch["labels"].to(device, non_blocking=True)
-            with autocast(enabled=device.type == "cuda"):
+            with autocast(device_type="cuda", enabled=device.type == "cuda"):
                 outputs = best_model(pixel_values=pixel_values, labels=label_ids, output_hidden_states=True)
                 layer_states = get_decoder_layer_states(outputs.decoder_hidden_states, decoder_num_layers)
                 int_loss = 0.0
