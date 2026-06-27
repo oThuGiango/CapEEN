@@ -1,7 +1,35 @@
-# Image Captioning with Early Exit (CapEEN)
+﻿# Image Captioning with Early Exit (CapEEN)
 
 This README matches the current code in `imgcap.py` and the dependency file
-`requirements_jetson.txt`.
+`requirements.txt`.
+
+## One-command setup (Jetson Orin / JetPack 6.1)
+
+Run:
+
+```bash
+chmod +x setup_jetson.sh
+./setup_jetson.sh
+```
+
+The script installs:
+- system dependencies (`default-jre`, build tools, etc.)
+- `cuSPARSELt` runtime needed by Jetson PyTorch wheel
+- Python virtual environment (`venv`)
+- all Python packages from `requirements.txt`
+
+Then run:
+
+```bash
+source venv/bin/activate
+python imgcap.py
+```
+
+## Why not only requirements.txt?
+
+`requirements.txt` only installs Python packages via pip. Some required pieces
+for Jetson (like CUDA runtime libraries such as `libcusparseLt.so.0`) are
+system-level libraries, so they must be installed by apt/script, not pip.
 
 ## Overview
 
@@ -141,40 +169,17 @@ unzip -q dataset/val2017.zip -d dataset
 rm -f dataset/val2017.zip
 ```
 
-## Install Dependencies
-
-Install with:
+## Manual install (alternative)
 
 ```bash
-pip install -r requirements_jetson.txt
+pip install -r requirements.txt
 sudo apt-get install -y default-jre
-```
-
-`requirements_jetson.txt` currently includes:
-
-```text
-torch==2.11.0+cu126
-torchvision==0.26.0+cu126
-datasets==2.21.0
-transformers==4.44.2
-accelerate==0.34.2
-numpy==1.26.4
-pillow==10.4.0
-tqdm==4.66.5
-requests==2.32.3
-pycocotools==2.0.8
-nltk==3.9.1
-sentencepiece==0.2.0
-scipy==1.13.1
-matplotlib==3.9.2
-git+https://github.com/salaniz/pycocoevalcap.git
 ```
 
 Notes:
 
-- `pycocoevalcap` is already in `requirements_jetson.txt`; do not install it a second time unless the first install fails.
+- `pycocoevalcap` is already in `requirements.txt`; do not install it a second time unless the first install fails.
 - METEOR requires Java, hence `default-jre`.
-- On Jetson, if the official PyTorch CUDA wheel is not available for your Python/aarch64 environment, install the NVIDIA Jetson PyTorch/torchvision wheels manually, then remove or comment the two `torch` lines in `requirements_jetson.txt` before installing the remaining packages.
 
 ## Run
 
@@ -220,59 +225,52 @@ Files:
 | File | Purpose |
 |------|---------|
 | `result.log` | Timestamped run log |
-| `baseline_step_log.csv` | Baseline step loss |
-| `baseline_epoch_log.csv` | Baseline epoch train/valid loss |
+| `baseline_step_log.csv` | Per-step baseline losses |
+| `baseline_epoch_log.csv` | Per-epoch baseline train/valid losses |
 | `baseline_test_metrics.csv` | Baseline BLEU/CIDEr/METEOR |
 | `baseline_test_predictions.csv` | Baseline predictions and references |
-| `exit_step_log.csv` | Exit-head step loss |
-| `exit_epoch_log.csv` | Exit-head epoch train/valid loss |
+| `exit_step_log.csv` | Per-step exit-head losses |
+| `exit_epoch_log.csv` | Per-epoch exit-head train/valid losses |
 | `exit_test_metrics.csv` | Early-exit BLEU/CIDEr/METEOR |
 | `exit_test_predictions.csv` | Early-exit predictions and references |
-| `exit_layer_usage.csv` | Exit-layer frequency |
-| `inference_timing.csv` | Baseline vs early-exit latency per image |
-| `baseline_train_loss.png` | Baseline train-loss chart |
-| `baseline_valid_loss.png` | Baseline valid-loss chart |
-| `exit_train_loss.png` | Exit-head train-loss chart |
-| `exit_valid_loss.png` | Exit-head valid-loss chart |
-| `README.md` | Auto-generated run summary |
+| `exit_layer_usage.csv` | Exit layer histogram |
+| `inference_timing.csv` | Baseline vs early-exit latency and ms/token |
+| `baseline_train_loss.png` | Baseline train-loss curve |
+| `baseline_valid_loss.png` | Baseline valid-loss curve |
+| `exit_train_loss.png` | Exit-head train-loss curve |
+| `exit_valid_loss.png` | Exit-head valid-loss curve |
+| `README.md` (inside result folder) | Run summary |
 
-Dataset cache files are config-tagged, for example:
+## Notes and Troubleshooting
 
-```text
-train_ds_coco_<dataset_root>_dev1_seed42_val0p9_traincap3_valcap3.pkl
-val_ds_coco_<dataset_root>_dev1_seed42_val0p9_traincap3_valcap3.pkl
+### 1) `FileNotFoundError: annotations/captions_train2014.json`
+
+- Ensure `annotations/captions_train2014.json` and
+  `annotations/captions_val2017.json` exist in project root.
+- If you run from another working directory, use absolute paths in `imgcap.py`.
+
+### 2) METEOR errors
+
+Install Java:
+
+```bash
+sudo apt-get install -y default-jre
 ```
 
-This prevents DEV and FULL dataset caches from being mixed.
+### 3) CUDA OOM
 
-## Metrics
+Reduce:
 
-The script computes:
+- `BASELINE_BATCH`
+- `EXIT_BATCH`
+- `MAX_LENGTH`
 
-| Metric | Meaning |
-|--------|---------|
-| BLEU-1..4 | n-gram overlap with reference captions |
-| CIDEr | Caption relevance/consensus metric |
-| METEOR | Precision/recall-oriented caption metric; requires Java |
+### 4) Early-exit speedup lower than expected
 
-## Timing / Speedup
+Tune:
 
-The script measures inference latency for each test image:
+- `EXIT_THRESHOLD`
+- `LAYERS_FOR_EXIT`
+- image resolution / processor settings
 
-| Column | Meaning |
-|--------|---------|
-| `model` | `baseline` or `early_exit` |
-| `id` | Test sample id |
-| `latency_ms` | Wall-clock inference time in milliseconds |
-| `tokens` | Number of generated tokens |
-| `ms_per_token` | `latency_ms / tokens` |
-| `avg_exit_layer` | Mean exit layer for that image; early-exit only |
-
-CUDA timing is synchronized before and after inference when CUDA is available.
-
-## Current Caveats
-
-- The early-exit decoder uses internal GPT-2 block APIs from Hugging Face Transformers. It is tied to the currently intended Transformers version in `requirements_jetson.txt`.
-- Early-exit inference recomputes the generated prefix instead of using KV cache. This is slower than cached decoding, but it avoids inconsistent deep-layer caches when a previous token exits early.
-- The current code uses mixed COCO versions: train captions/images from 2014 and validation/test captions/images from 2017. This README documents that behavior exactly.
-- Full training on Jetson AGX Orin can take a long time. Use `DEV_MODE=True` first.
+A higher threshold usually improves quality but exits later.

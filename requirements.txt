@@ -1,7 +1,7 @@
---extra-index-url https://download.pytorch.org/whl/cu126
-torch==2.11.0+cu126
-torchvision==0.26.0+cu126
- 
+﻿# Jetson Orin (JetPack 6.1 / Python 3.10)
+# Install this torch wheel (includes CUDA build supporting Orin sm_87)
+https://developer.nvidia.com/w/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl
+
 datasets==2.21.0
 transformers==4.44.2
 accelerate==0.34.2
