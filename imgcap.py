@@ -14,6 +14,28 @@
 #  DEV_MODE = False  → chạy full train cho báo cáo
 # =============================================================================
 
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.bleu.bleu import Bleu
+import transformers
+from transformers import (
+    AutoConfig,
+    AutoImageProcessor,
+    AutoTokenizer,
+    GPT2TokenizerFast,
+    VisionEncoderDecoderModel,
+    get_linear_schedule_with_warmup,
+)
+from datasets import Dataset
+from tqdm import tqdm
+from PIL import Image
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.amp import GradScaler, autocast
+import torch.nn.functional as F
+import torch.nn as nn
+import torch
+import matplotlib.pyplot as plt
 import os
 import re
 import csv
@@ -29,36 +51,16 @@ import random
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")          # không cần display server (Jetson headless)
-import matplotlib.pyplot as plt
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
-
-from PIL import Image
-from tqdm import tqdm
-from datasets import Dataset
-from transformers import (
-    AutoConfig,
-    AutoImageProcessor,
-    AutoTokenizer,
-    GPT2TokenizerFast,
-    VisionEncoderDecoderModel,
-    get_linear_schedule_with_warmup,
-)
-import transformers
 
 # --- ĐẶT PATH Ở ĐÂY ---
 BASELINE_CKPT_BASE = "./image-captioning"  # nơi lưu best baseline model
 EXIT_CKPT_DIR_BASE = "./checkpoint/intermediate_head_weights"
 
 ANNOTATIONS_DIR = "annotations"
-DATASET_ROOT   = "/mnt/usb/coco2014"
+DATASET_ROOT = "/mnt/usb/coco2014"
 TRAIN_IMAGE_DIR = os.path.join(DATASET_ROOT, "train2014")
-VAL_IMAGE_DIR   = os.path.join(DATASET_ROOT, "val2017")
+VAL_IMAGE_DIR = os.path.join(DATASET_ROOT, "val2017")
 
 # --- DEV MODE ---
 DEV_MODE = True   # True = pipeline test ~15 phút | False = full train
@@ -90,6 +92,9 @@ VOCAB_SIZE = 50257   # vocab size GPT-2 (không đổi)
 CAPTIONS_PER_IMAGE_TRAIN = 3
 CAPTIONS_PER_IMAGE_VAL = 3
 
+# --- Full-run data budget (0 = dùng toàn bộ) ---
+FULL_TRAIN_IMAGE_LIMIT = 50000
+
 # --- Val/Test split ---
 VAL_SPLIT_RATIO = 0.9   # 90% val2017 -> val, 10% -> test
 SPLIT_SEED = 42         # reproducible split
@@ -100,27 +105,27 @@ REBUILD_DATASET_CACHE = False
 
 # --- DataLoader ---
 NUM_WORKERS = 2 if torch.cuda.is_available() else 0
-PIN_MEMORY  = torch.cuda.is_available()
+PIN_MEMORY = torch.cuda.is_available()
 
 # --- Logging ---
 LOG_EVERY_STEPS = 20   # in log mỗi N step
 
 # --- Phase 1: Baseline fine-tune ---
-#   Full train: 15 epoch, batch 4 (Jetson 64 GB unified RAM + AMP đủ)
+#   Full train: 5 epoch, batch 4 (Jetson 64 GB unified RAM + AMP đủ)
 #   batch=4 an toàn vì Swin-Base encoder ~88M params, GPT-2 ~117M params;
 #   peak VRAM ≈ 6–8 GB với AMP fp16, còn xa ngưỡng 64 GB.
-BASELINE_EPOCHS = 8
-BASELINE_BATCH  = 4
-BASELINE_LR     = 1e-4
+BASELINE_EPOCHS = 5
+BASELINE_BATCH = 4
+BASELINE_LR = 5e-5
 
 # --- Phase 2: Early Exit heads (Knowledge Distillation) ---
 #   Chỉ train 12 linear heads nhỏ, best_model frozen → batch có thể cao hơn
-EXIT_EPOCHS       = 3
-EXIT_BATCH        = 4
-EXIT_LR           = 1e-4
+EXIT_EPOCHS = 2
+EXIT_BATCH = 4
+EXIT_LR = 1e-4
 EXIT_WARMUP_STEPS = 1000
-LAYERS_FOR_EXIT   = list(range(12))   # layer 0 → 11 của GPT-2 decoder
-EXIT_THRESHOLD    = 1.5               # ngưỡng aggregated confidence để exit sớm
+LAYERS_FOR_EXIT = list(range(12))   # layer 0 → 11 của GPT-2 decoder
+EXIT_THRESHOLD = 1.5               # ngưỡng aggregated confidence để exit sớm
 
 # --- Early Stopping ---
 # Dừng train sớm nếu valid_loss không cải thiện sau N epoch liên tiếp.
@@ -133,14 +138,17 @@ EARLY_STOP_PATIENCE = 2  # Phase 1 và Phase 2 dùng chung giá trị này
 # Bật bằng cách đặt DEV_MODE = True ở đầu file
 # ---------------------------------------------------------------------------
 if DEV_MODE:
-    BASELINE_EPOCHS   = 1
-    EXIT_EPOCHS       = 1
-    BASELINE_BATCH    = 2
-    EXIT_BATCH        = 2
+    BASELINE_EPOCHS = 1
+    EXIT_EPOCHS = 1
+    BASELINE_BATCH = 2
+    EXIT_BATCH = 2
     EXIT_WARMUP_STEPS = 10
-    LOG_EVERY_STEPS   = 5
+    LOG_EVERY_STEPS = 5
     EARLY_STOP_PATIENCE = 0   # DEV mode không cần early stop
     print("[DEV MODE] Pipeline test: 1 epoch, 200 train / 50 val / 30 test samples")
+else:
+    print(
+        f"[FULL MODE] Train image limit: {FULL_TRAIN_IMAGE_LIMIT if FULL_TRAIN_IMAGE_LIMIT > 0 else 'all'}")
 
 random.seed(SPLIT_SEED)
 np.random.seed(SPLIT_SEED)
@@ -214,7 +222,7 @@ def write_readme(summary_path, lines):
 # =============================================================================
 
 train_ann_file = os.path.join(ANNOTATIONS_DIR, "captions_train2014.json")
-val_ann_file   = os.path.join(ANNOTATIONS_DIR, "captions_val2017.json")
+val_ann_file = os.path.join(ANNOTATIONS_DIR, "captions_val2017.json")
 
 with open(train_ann_file, "r") as f:
     train_coco = json.load(f)
@@ -223,16 +231,26 @@ with open(val_ann_file, "r") as f:
 
 # Map image_id -> file_name
 train_id2file = {img["id"]: img["file_name"] for img in train_coco["images"]}
-val_id2file   = {img["id"]: img["file_name"] for img in val_coco["images"]}
+val_id2file = {img["id"]: img["file_name"] for img in val_coco["images"]}
 
 # Map image_id -> danh sách caption (mỗi ảnh có 5 caption tham chiếu)
 train_image2sentences = {}
 for ann in train_coco["annotations"]:
-    train_image2sentences.setdefault(ann["image_id"], []).append({"raw": ann["caption"]})
+    train_image2sentences.setdefault(
+        ann["image_id"], []).append({"raw": ann["caption"]})
+
+if not DEV_MODE and FULL_TRAIN_IMAGE_LIMIT > 0:
+    train_ids = list(train_image2sentences.keys())
+    rng_train = random.Random(SPLIT_SEED)
+    rng_train.shuffle(train_ids)
+    selected_ids = set(train_ids[:FULL_TRAIN_IMAGE_LIMIT])
+    train_image2sentences = {
+        k: v for k, v in train_image2sentences.items() if k in selected_ids}
 
 val_image2sentences = {}
 for ann in val_coco["annotations"]:
-    val_image2sentences.setdefault(ann["image_id"], []).append({"raw": ann["caption"]})
+    val_image2sentences.setdefault(
+        ann["image_id"], []).append({"raw": ann["caption"]})
 
 # Tạo train_samples: mỗi cặp (image_path, 1 caption) là 1 sample
 train_samples = []
@@ -246,7 +264,7 @@ for image_id, sentences in tqdm(train_image2sentences.items(), desc="Build train
 # Tạo val_samples và test_samples từ val2017:
 # - 90% image_id đầu làm val (mỗi caption là 1 sample riêng)
 # - 10% cuối làm test (giữ ngựyên 5 caption / ảnh để đánh giá metric đa tham chiếu)
-val_samples  = []
+val_samples = []
 test_samples = []
 rng = random.Random(SPLIT_SEED)
 val_ids = list(val_image2sentences.keys())
@@ -268,11 +286,24 @@ for idx, image_id in enumerate(tqdm(val_ids, desc="Build val/test samples")):
 # DEV MODE: cắt dataset xuống còn nhỏ để test pipeline ~15 phút
 if DEV_MODE:
     train_samples = train_samples[:200]
-    val_samples   = val_samples[:50]
-    test_samples  = test_samples[:30]
+    val_samples = val_samples[:50]
+    test_samples = test_samples[:30]
+
+train_unique_images = len({x["image_path"] for x in train_samples})
+val_unique_images = len({x["image_path"] for x in val_samples})
+test_unique_images = len({x["image_path"] for x in test_samples})
+test_ref_count = sum(len(x["caption"]) if isinstance(
+    x["caption"], list) else 1 for x in test_samples)
+log_message(
+    "[Data] "
+    f"train_images={train_unique_images}, train_samples={len(train_samples)}, "
+    f"val_images={val_unique_images}, val_samples={len(val_samples)}, "
+    f"test_images={test_unique_images}, test_samples={len(test_samples)}, test_refs={test_ref_count}"
+)
 
 # Cache dataset ra file pkl để lần sau khởi động nhanh hơn (bỏ qua bước xử lý JSON lại)
-dataset_root_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.abspath(DATASET_ROOT)).strip("_")
+dataset_root_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_",
+                          os.path.abspath(DATASET_ROOT)).strip("_")
 split_tag = str(VAL_SPLIT_RATIO).replace(".", "p")
 cache_tag = (
     f"{dataset_root_tag}_dev{int(DEV_MODE)}_seed{SPLIT_SEED}_val{split_tag}"
@@ -281,7 +312,8 @@ cache_tag = (
 train_cache_path = f"train_ds_coco_{cache_tag}.pkl"
 val_cache_path = f"val_ds_coco_{cache_tag}.pkl"
 
-cache_available = os.path.exists(train_cache_path) and os.path.exists(val_cache_path)
+cache_available = os.path.exists(
+    train_cache_path) and os.path.exists(val_cache_path)
 if USE_DATASET_CACHE and cache_available and not REBUILD_DATASET_CACHE:
     with open(train_cache_path, "rb") as f:
         train_ds_coco = pickle.load(f)
@@ -298,6 +330,7 @@ else:
 # =============================================================================
 # SECTION 2 – Tiện ích đọc ảnh (hỗ trợ cả file cục bộ lẫn URL)
 # =============================================================================
+
 
 def is_url(string: str) -> bool:
     """Kiểm tra chuỗi có phải URL hợp lệ không."""
@@ -341,25 +374,29 @@ image_processor = AutoImageProcessor.from_pretrained(ENCODER_MODEL)
 # Cấu hình token đặc biệt cho GPT-2
 if "gpt2" in DECODER_MODEL:
     tokenizer.pad_token = tokenizer.eos_token
-    model.config.eos_token_id          = tokenizer.eos_token_id
-    model.config.pad_token_id          = tokenizer.pad_token_id
+    model.config.eos_token_id = tokenizer.eos_token_id
+    model.config.pad_token_id = tokenizer.pad_token_id
     model.config.decoder_start_token_id = tokenizer.bos_token_id
 else:
     model.config.decoder_start_token_id = tokenizer.cls_token_id
-    model.config.pad_token_id           = tokenizer.pad_token_id
+    model.config.pad_token_id = tokenizer.pad_token_id
 
 # Load dataset từ biến cache đã tạo/đọc ở Section 1
 train_ds = train_ds_coco
 valid_ds = val_ds_coco
 
 # Xử lý thành dạng 'pixel_values'-'labels(ids)'
+
+
 def preprocess(items):
     # preprocess the image
     images = []
     captions = []
 
-    imgs = items["image_path"] if isinstance(items["image_path"], list) else [items["image_path"]]
-    sentences = items["caption"] if isinstance(items["caption"], list) else [items["caption"]]
+    imgs = items["image_path"] if isinstance(items["image_path"], list) else [
+        items["image_path"]]
+    sentences = items["caption"] if isinstance(
+        items["caption"], list) else [items["caption"]]
 
     for img, sents in zip(imgs, sentences):
         images.append(load_image(img))
@@ -382,11 +419,13 @@ def preprocess(items):
 train_dataset = train_ds.with_transform(preprocess)
 valid_dataset = valid_ds.with_transform(preprocess)
 
+
 def collate_fn(batch):
     return {
         'pixel_values': torch.stack([x['pixel_values'] for x in batch]),
         'labels': torch.stack([x['labels'] for x in batch])
     }
+
 
 # DataLoader – dùng tham số từ CONFIG block
 train_loader = DataLoader(
@@ -427,15 +466,12 @@ valid_loader_exit = DataLoader(
 # Optimizer và AMP scaler cho Phase 1
 current_step = 0
 optimizer = AdamW(model.parameters(), lr=BASELINE_LR)
-scaler    = GradScaler(enabled=device.type == "cuda")
+scaler = GradScaler(enabled=device.type == "cuda")
 
 # =============================================================================
 # SECTION 5 – Hàm tính metric: BLEU-1~4 / CIDEr / METEOR
 # =============================================================================
 
-from pycocoevalcap.bleu.bleu import Bleu
-from pycocoevalcap.cider.cider import Cider
-from pycocoevalcap.meteor.meteor import Meteor
 
 def compute_caption_metrics(
     predictions: dict[int, list[str]],
@@ -503,19 +539,22 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
     inter_heads = list(inter_heads)
     num_layers = len(inter_heads)
 
-    encoder_outputs = model_ved.encoder(pixel_values=pixel_values, return_dict=True)
+    encoder_outputs = model_ved.encoder(
+        pixel_values=pixel_values, return_dict=True)
     encoder_hidden_states = encoder_outputs.last_hidden_state
 
     # Align encoder hidden size to decoder hidden size when they differ (e.g., Swin-Base 1024 -> GPT-2 768).
     if hasattr(model_ved, "enc_to_dec_proj") and model_ved.enc_to_dec_proj is not None:
-        encoder_hidden_states = model_ved.enc_to_dec_proj(encoder_hidden_states)
+        encoder_hidden_states = model_ved.enc_to_dec_proj(
+            encoder_hidden_states)
 
     encoder_attention_mask = torch.ones(
         encoder_hidden_states.shape[:2],
         dtype=torch.long,
         device=encoder_hidden_states.device,
     )
-    encoder_attention_mask = transformer.invert_attention_mask(encoder_attention_mask)
+    encoder_attention_mask = transformer.invert_attention_mask(
+        encoder_attention_mask)
 
     generated = [start_token_id]
     layer_trace = []
@@ -523,11 +562,15 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
     for _ in range(max_length):
         input_ids = torch.tensor([generated], device=pixel_values.device)
         seq_len = input_ids.size(1)
-        pos_ids = torch.arange(0, seq_len, dtype=torch.long, device=pixel_values.device).unsqueeze(0)
+        pos_ids = torch.arange(0, seq_len, dtype=torch.long,
+                               device=pixel_values.device).unsqueeze(0)
 
-        dec_mask = torch.ones((1, seq_len), dtype=torch.long, device=pixel_values.device)
-        dec_mask = dec_mask[:, None, None, :].to(dtype=transformer.wte.weight.dtype)
-        dec_mask = (1.0 - dec_mask) * torch.finfo(transformer.wte.weight.dtype).min
+        dec_mask = torch.ones((1, seq_len), dtype=torch.long,
+                              device=pixel_values.device)
+        dec_mask = dec_mask[:, None, None, :].to(
+            dtype=transformer.wte.weight.dtype)
+        dec_mask = (1.0 - dec_mask) * \
+            torch.finfo(transformer.wte.weight.dtype).min
 
         hidden_states = transformer.wte(input_ids) + transformer.wpe(pos_ids)
         hidden_states = transformer.drop(hidden_states)
@@ -551,10 +594,12 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
             )
             hidden_states = block_outputs[0]
 
-            head_hidden_states = transformer.ln_f(hidden_states) if layer_idx == num_layers - 1 else hidden_states
+            head_hidden_states = transformer.ln_f(
+                hidden_states) if layer_idx == num_layers - 1 else hidden_states
             logits = inter_heads[layer_idx](head_hidden_states)
             token = logits[:, -1, :].argmax(-1).item()
-            conf = torch.softmax(logits[:, -1, :], dim=-1).max(-1).values.item()
+            conf = torch.softmax(
+                logits[:, -1, :], dim=-1).max(-1).values.item()
 
             if prev_token is None:
                 agg_conf = conf
@@ -590,17 +635,18 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
 # =============================================================================
 
 log_message(f"Run started. Results dir: {RESULTS_DIR}")
-log_message(f"Run mode: {RUN_MODE}. Baseline checkpoint: {BASELINE_CKPT}. Exit checkpoint dir: {EXIT_CKPT_DIR}")
+log_message(
+    f"Run mode: {RUN_MODE}. Baseline checkpoint: {BASELINE_CKPT}. Exit checkpoint dir: {EXIT_CKPT_DIR}")
 
-baseline_step_csv    = os.path.join(RESULTS_DIR, "baseline_step_log.csv")
-baseline_epoch_csv   = os.path.join(RESULTS_DIR, "baseline_epoch_log.csv")
+baseline_step_csv = os.path.join(RESULTS_DIR, "baseline_step_log.csv")
+baseline_epoch_csv = os.path.join(RESULTS_DIR, "baseline_epoch_log.csv")
 baseline_metrics_csv = os.path.join(RESULTS_DIR, "baseline_test_metrics.csv")
-baseline_pred_csv    = os.path.join(RESULTS_DIR, "baseline_test_predictions.csv")
+baseline_pred_csv = os.path.join(RESULTS_DIR, "baseline_test_predictions.csv")
 
-exit_step_csv        = os.path.join(RESULTS_DIR, "exit_step_log.csv")
-exit_epoch_csv       = os.path.join(RESULTS_DIR, "exit_epoch_log.csv")
-exit_metrics_csv     = os.path.join(RESULTS_DIR, "exit_test_metrics.csv")
-exit_pred_csv        = os.path.join(RESULTS_DIR, "exit_test_predictions.csv")
+exit_step_csv = os.path.join(RESULTS_DIR, "exit_step_log.csv")
+exit_epoch_csv = os.path.join(RESULTS_DIR, "exit_epoch_log.csv")
+exit_metrics_csv = os.path.join(RESULTS_DIR, "exit_test_metrics.csv")
+exit_pred_csv = os.path.join(RESULTS_DIR, "exit_test_predictions.csv")
 exit_layer_usage_csv = os.path.join(RESULTS_DIR, "exit_layer_usage.csv")
 inference_timing_csv = os.path.join(RESULTS_DIR, "inference_timing.csv")
 
@@ -620,7 +666,8 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
         labels = batch["labels"].to(device, non_blocking=True)
 
         with autocast(device_type="cuda", enabled=device.type == "cuda"):
-            outputs = model(pixel_values=pixel_values, labels=labels, output_hidden_states=True)
+            outputs = model(pixel_values=pixel_values,
+                            labels=labels, output_hidden_states=True)
             loss = outputs.loss
 
         scaler.scale(loss).backward()
@@ -644,7 +691,8 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
         )
 
         if current_step % LOG_EVERY_STEPS == 0:
-            log_message(f"[Baseline] step={current_step}, epoch={epoch}, batch={batch_idx}, step_loss={step_loss:.6f}")
+            log_message(
+                f"[Baseline] step={current_step}, epoch={epoch}, batch={batch_idx}, step_loss={step_loss:.6f}")
 
     train_loss_epoch = train_loss_sum / max(1, len(train_loader))
 
@@ -656,14 +704,16 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
             pixel_values = batch["pixel_values"].to(device, non_blocking=True)
             label_ids = batch["labels"].to(device, non_blocking=True)
             with autocast(device_type="cuda", enabled=device.type == "cuda"):
-                outputs = model(pixel_values=pixel_values, labels=label_ids, output_hidden_states=True)
+                outputs = model(pixel_values=pixel_values,
+                                labels=label_ids, output_hidden_states=True)
                 valid_loss_sum += float(outputs.loss.item())
 
     valid_loss_epoch = valid_loss_sum / max(1, len(valid_loader))
 
     append_csv_row(
         baseline_epoch_csv,
-        ["epoch", "train_loss", "valid_loss", "best_valid_loss_so_far", "saved_checkpoint"],
+        ["epoch", "train_loss", "valid_loss",
+            "best_valid_loss_so_far", "saved_checkpoint"],
         {
             "epoch": epoch,
             "train_loss": round(train_loss_epoch, 6),
@@ -683,12 +733,15 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
         model.save_pretrained(BASELINE_CKPT)
         tokenizer.save_pretrained(BASELINE_CKPT)
         image_processor.save_pretrained(BASELINE_CKPT)
-        log_message(f"[Baseline] New best model saved  valid_loss={valid_loss_epoch:.6f}")
+        log_message(
+            f"[Baseline] New best model saved  valid_loss={valid_loss_epoch:.6f}")
     else:
         es_counter_base += 1
-        log_message(f"[Baseline] No improvement {es_counter_base}/{EARLY_STOP_PATIENCE}")
+        log_message(
+            f"[Baseline] No improvement {es_counter_base}/{EARLY_STOP_PATIENCE}")
         if EARLY_STOP_PATIENCE > 0 and es_counter_base >= EARLY_STOP_PATIENCE:
-            log_message(f"[Baseline] Early stopping triggered at epoch {epoch}")
+            log_message(
+                f"[Baseline] Early stopping triggered at epoch {epoch}")
             break
 
 
@@ -701,21 +754,24 @@ gts = {}
 baseline_pred_rows = []
 baseline_timing_rows = []
 
-baseline_eval_model = VisionEncoderDecoderModel.from_pretrained(BASELINE_CKPT).to(device)
+baseline_eval_model = VisionEncoderDecoderModel.from_pretrained(
+    BASELINE_CKPT).to(device)
 baseline_eval_model.eval()
 baseline_eval_tokenizer = AutoTokenizer.from_pretrained(BASELINE_CKPT)
 baseline_eval_processor = AutoImageProcessor.from_pretrained(BASELINE_CKPT)
 
 for sample_id, item in enumerate(tqdm(test_samples, desc="Baseline Test Inference")):
     image = load_image(item["image_path"])
-    pixel = baseline_eval_processor(image, return_tensors="pt").pixel_values.to(device)
+    pixel = baseline_eval_processor(
+        image, return_tensors="pt").pixel_values.to(device)
     with torch.no_grad():
         sync_cuda_if_needed()
         infer_start = time.perf_counter()
         predict = baseline_eval_model.generate(pixel, max_length=MAX_LENGTH)
         sync_cuda_if_needed()
         latency_ms = (time.perf_counter() - infer_start) * 1000.0
-    cap_predict = baseline_eval_tokenizer.batch_decode(predict, skip_special_tokens=True)[0]
+    cap_predict = baseline_eval_tokenizer.batch_decode(
+        predict, skip_special_tokens=True)[0]
     cap_predict = re.sub(r"\s+", " ", cap_predict).strip()
     output_tokens = int(predict.shape[-1])
 
@@ -742,7 +798,8 @@ for sample_id, item in enumerate(tqdm(test_samples, desc="Baseline Test Inferenc
     )
 
 scores = compute_caption_metrics(preds, gts)
-log_message("[Baseline] Final test metrics: " + ", ".join([f"{k}={v:.4f}" for k, v in scores.items()]))
+log_message("[Baseline] Final test metrics: " +
+            ", ".join([f"{k}={v:.4f}" for k, v in scores.items()]))
 
 save_dict_to_csv(
     baseline_metrics_csv,
@@ -756,15 +813,16 @@ save_dict_to_csv(baseline_pred_csv, baseline_pred_rows)
 # =============================================================================
 
 # Load best baseline checkpoint để làm teacher, freeze toàn bộ tham số
-best_model = VisionEncoderDecoderModel.from_pretrained(BASELINE_CKPT).to(device)
+best_model = VisionEncoderDecoderModel.from_pretrained(
+    BASELINE_CKPT).to(device)
 best_model.eval()
 for p in best_model.parameters():
     p.requires_grad = False
 
-tokenizer       = AutoTokenizer.from_pretrained(BASELINE_CKPT)
+tokenizer = AutoTokenizer.from_pretrained(BASELINE_CKPT)
 image_processor = AutoImageProcessor.from_pretrained(BASELINE_CKPT)
 
-num_epochs_exit  = EXIT_EPOCHS
+num_epochs_exit = EXIT_EPOCHS
 current_step_exit = 0
 
 
@@ -773,6 +831,7 @@ class IntermediateHead(nn.Module):
     Linear head gắn vào hidden state của từng decoder layer.
     Project từ hidden_size → vocab_size để dự đoán token tại mỗi layer trung gian.
     """
+
     def __init__(self, input_size: int, output_size: int):
         super().__init__()
         self.fc = nn.Linear(input_size, output_size)
@@ -783,7 +842,8 @@ class IntermediateHead(nn.Module):
 
 layers_for_exit = LAYERS_FOR_EXIT
 intermediate_heads = nn.ModuleList(
-    [IntermediateHead(decoder_config.hidden_size, VOCAB_SIZE) for _ in layers_for_exit]
+    [IntermediateHead(decoder_config.hidden_size, VOCAB_SIZE)
+     for _ in layers_for_exit]
 ).to(device)
 
 optimizer_exit = AdamW(intermediate_heads.parameters(), lr=EXIT_LR)
@@ -792,11 +852,11 @@ scheduler_exit = get_linear_schedule_with_warmup(
     num_warmup_steps=EXIT_WARMUP_STEPS,
     num_training_steps=max(1, EXIT_EPOCHS * len(train_loader_exit)),
 )
-scaler_heads   = GradScaler(enabled=device.type == "cuda")
-kl_div_loss    = nn.KLDivLoss(reduction="batchmean")
+scaler_heads = GradScaler(enabled=device.type == "cuda")
+kl_div_loss = nn.KLDivLoss(reduction="batchmean")
 
-best_exit_valid_loss      = float("inf")
-es_counter_exit           = 0   # đếm số epoch liên tiếp không cải thiện (early stop)
+best_exit_valid_loss = float("inf")
+es_counter_exit = 0   # đếm số epoch liên tiếp không cải thiện (early stop)
 intermediate_head_weights_dir = EXIT_CKPT_DIR
 os.makedirs(intermediate_head_weights_dir, exist_ok=True)
 
@@ -810,8 +870,10 @@ for epoch in range(1, num_epochs_exit + 1):
 
         with autocast(device_type="cuda", enabled=device.type == "cuda"):
             # best_model frozen, chỉ lấy hidden states làm input cho các head
-            outputs = best_model(pixel_values=pixel_values, labels=labels, output_hidden_states=True)
-            layer_states = get_decoder_layer_states(outputs.decoder_hidden_states, decoder_num_layers)
+            outputs = best_model(pixel_values=pixel_values,
+                                 labels=labels, output_hidden_states=True)
+            layer_states = get_decoder_layer_states(
+                outputs.decoder_hidden_states, decoder_num_layers)
             valid_token_mask = labels.ne(-100)
             teacher_logits = outputs.logits.detach()
             int_loss_train = 0.0
@@ -857,7 +919,8 @@ for epoch in range(1, num_epochs_exit + 1):
         )
 
         if current_step_exit % LOG_EVERY_STEPS == 0:
-            log_message(f"[Exit] step={current_step_exit}, epoch={epoch}, batch={batch_idx}, step_loss={step_loss:.6f}")
+            log_message(
+                f"[Exit] step={current_step_exit}, epoch={epoch}, batch={batch_idx}, step_loss={step_loss:.6f}")
 
     train_loss_epoch = train_loss_sum / max(1, len(train_loader_exit))
 
@@ -869,8 +932,10 @@ for epoch in range(1, num_epochs_exit + 1):
             pixel_values = batch["pixel_values"].to(device, non_blocking=True)
             label_ids = batch["labels"].to(device, non_blocking=True)
             with autocast(device_type="cuda", enabled=device.type == "cuda"):
-                outputs = best_model(pixel_values=pixel_values, labels=label_ids, output_hidden_states=True)
-                layer_states = get_decoder_layer_states(outputs.decoder_hidden_states, decoder_num_layers)
+                outputs = best_model(
+                    pixel_values=pixel_values, labels=label_ids, output_hidden_states=True)
+                layer_states = get_decoder_layer_states(
+                    outputs.decoder_hidden_states, decoder_num_layers)
                 int_loss = 0.0
                 weight_sum = 0.0
                 for exit_idx in range(len(layers_for_exit)):
@@ -894,18 +959,21 @@ for epoch in range(1, num_epochs_exit + 1):
         best_exit_valid_loss = valid_loss_epoch
         es_counter_exit = 0   # reset khi có cải thiện
         for layer_idx, head in enumerate(intermediate_heads):
-            head_path = os.path.join(intermediate_head_weights_dir, f"head_layer_{layers_for_exit[layer_idx]}.pt")
+            head_path = os.path.join(
+                intermediate_head_weights_dir, f"head_layer_{layers_for_exit[layer_idx]}.pt")
             torch.save(head.state_dict(), head_path)
     else:
         es_counter_exit += 1
-        log_message(f"[Exit] No improvement {es_counter_exit}/{EARLY_STOP_PATIENCE}")
+        log_message(
+            f"[Exit] No improvement {es_counter_exit}/{EARLY_STOP_PATIENCE}")
         if EARLY_STOP_PATIENCE > 0 and es_counter_exit >= EARLY_STOP_PATIENCE:
             log_message(f"[Exit] Early stopping triggered at epoch {epoch}")
             break
 
     append_csv_row(
         exit_epoch_csv,
-        ["epoch", "train_loss", "valid_loss", "best_valid_loss_so_far", "saved_checkpoint"],
+        ["epoch", "train_loss", "valid_loss",
+            "best_valid_loss_so_far", "saved_checkpoint"],
         {
             "epoch": epoch,
             "train_loss": round(train_loss_epoch, 6),
@@ -926,7 +994,8 @@ for epoch in range(1, num_epochs_exit + 1):
 
 # Load best exit head weights
 for layer_idx, head in enumerate(intermediate_heads):
-    head_path = os.path.join(intermediate_head_weights_dir, f"head_layer_{layers_for_exit[layer_idx]}.pt")
+    head_path = os.path.join(
+        intermediate_head_weights_dir, f"head_layer_{layers_for_exit[layer_idx]}.pt")
     if os.path.exists(head_path):
         state_dict = torch.load(head_path, map_location=device)
         head.load_state_dict(state_dict)
@@ -934,14 +1003,15 @@ for layer_idx, head in enumerate(intermediate_heads):
     head.eval()
 
 predictions = {}
-layer_list  = []
+layer_list = []
 exit_pred_rows = []
 exit_timing_rows = []
 
 with torch.no_grad():
     for sample_id, item in enumerate(tqdm(test_samples, desc="Exit Test Inference")):
         image = load_image(item["image_path"])
-        pixel_values = image_processor(image, return_tensors="pt").pixel_values.to(device)
+        pixel_values = image_processor(
+            image, return_tensors="pt").pixel_values.to(device)
         start_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
         sync_cuda_if_needed()
         infer_start = time.perf_counter()
@@ -983,9 +1053,11 @@ with torch.no_grad():
         )
 
 scores_exit = compute_caption_metrics(predictions, gts)
-log_message("[Exit] Final test metrics: " + ", ".join([f"{k}={v:.4f}" for k, v in scores_exit.items()]))
+log_message("[Exit] Final test metrics: " +
+            ", ".join([f"{k}={v:.4f}" for k, v in scores_exit.items()]))
 
-save_dict_to_csv(exit_metrics_csv, [{"metric": k, "score": v} for k, v in scores_exit.items()])
+save_dict_to_csv(exit_metrics_csv, [
+                 {"metric": k, "score": v} for k, v in scores_exit.items()])
 save_dict_to_csv(exit_pred_csv, exit_pred_rows)
 
 layer_usage_rows = []
@@ -1005,10 +1077,14 @@ save_dict_to_csv(exit_layer_usage_csv, layer_usage_rows)
 all_timing_rows = baseline_timing_rows + exit_timing_rows
 save_dict_to_csv(inference_timing_csv, all_timing_rows)
 
-baseline_avg_latency = float(np.mean([r["latency_ms"] for r in baseline_timing_rows])) if baseline_timing_rows else 0.0
-exit_avg_latency = float(np.mean([r["latency_ms"] for r in exit_timing_rows])) if exit_timing_rows else 0.0
-baseline_avg_ms_per_token = float(np.mean([r["ms_per_token"] for r in baseline_timing_rows])) if baseline_timing_rows else 0.0
-exit_avg_ms_per_token = float(np.mean([r["ms_per_token"] for r in exit_timing_rows])) if exit_timing_rows else 0.0
+baseline_avg_latency = float(np.mean(
+    [r["latency_ms"] for r in baseline_timing_rows])) if baseline_timing_rows else 0.0
+exit_avg_latency = float(np.mean(
+    [r["latency_ms"] for r in exit_timing_rows])) if exit_timing_rows else 0.0
+baseline_avg_ms_per_token = float(np.mean(
+    [r["ms_per_token"] for r in baseline_timing_rows])) if baseline_timing_rows else 0.0
+exit_avg_ms_per_token = float(np.mean(
+    [r["ms_per_token"] for r in exit_timing_rows])) if exit_timing_rows else 0.0
 avg_exit_layer = float(np.mean(layer_list)) if layer_list else 0.0
 speedup = baseline_avg_latency / exit_avg_latency if exit_avg_latency > 0 else 0.0
 

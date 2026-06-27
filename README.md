@@ -198,8 +198,8 @@ Recommended workflow:
 
 | Parameter | Current full value | DEV override |
 |-----------|--------------------|--------------|
-| `BASELINE_EPOCHS` | 15 | 1 |
-| `EXIT_EPOCHS` | 5 | 1 |
+| `BASELINE_EPOCHS` | 5 | 1 |
+| `EXIT_EPOCHS` | 2 | 1 |
 | `BASELINE_BATCH` | 4 | 2 |
 | `EXIT_BATCH` | 4 | 2 |
 | `BASELINE_LR` | `1e-4` | same |
