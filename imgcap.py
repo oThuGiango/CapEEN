@@ -63,7 +63,7 @@ TRAIN_IMAGE_DIR = os.path.join(DATASET_ROOT, "train2014")
 VAL_IMAGE_DIR = os.path.join(DATASET_ROOT, "val2017")
 
 # --- DEV MODE ---
-DEV_MODE = True   # True = pipeline test ~15 phút | False = full train
+DEV_MODE = False   # True = pipeline test ~15 phút | False = full train
 RUN_MODE = "dev" if DEV_MODE else "full"
 BASELINE_CKPT = f"{BASELINE_CKPT_BASE}-{RUN_MODE}"
 EXIT_CKPT_DIR = f"{EXIT_CKPT_DIR_BASE}_{RUN_MODE}"
@@ -159,6 +159,7 @@ if torch.cuda.is_available():
 # =============================================================================
 
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_START = time.perf_counter()
 RESULTS_DIR = os.path.join("results", RUN_MODE, RUN_TS)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -1208,3 +1209,11 @@ readme_lines.extend(
 
 write_readme(os.path.join(RESULTS_DIR, "README.md"), readme_lines)
 log_message("All report artifacts generated successfully.")
+total_seconds = time.perf_counter() - RUN_START
+hours, rem = divmod(int(total_seconds), 3600)
+minutes, seconds = divmod(rem, 60)
+
+log_message(
+    f"[Duration] total_runtime={hours:02d}:{minutes:02d}:{seconds:02d} "
+    f"({total_seconds:.2f}s)"
+)
