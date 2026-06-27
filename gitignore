@@ -1,0 +1,35 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Large training artifacts
+image-captioning/
+image-captioning-dev/
+image-captioning-full/
+checkpoint/
+
+# Local dataset and generated dataset caches
+dataset/
+annotations_trainval2014.zip
+annotations_trainval2017.zip
+*.pkl
+train_ds_coco_*.pkl
+val_ds_coco_*.pkl
+
+# Notebook and runtime temp
+.ipynb_checkpoints/
+
+# Keep report outputs in results/ for sharing and review
+# (do NOT ignore results/)

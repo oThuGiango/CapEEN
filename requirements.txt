@@ -1,10 +1,17 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
-
 torch==2.11.0+cu126
 torchvision==0.26.0+cu126
-requests
-Pillow
-tqdm
-numpy
-transformers
-pycocoevalcap
+ 
+datasets==2.21.0
+transformers==4.44.2
+accelerate==0.34.2
+numpy==1.26.4
+pillow==10.4.0
+tqdm==4.66.5
+requests==2.32.3
+pycocotools==2.0.8
+nltk==3.9.1
+sentencepiece==0.2.0
+scipy==1.13.1
+matplotlib==3.9.2
+git+https://github.com/salaniz/pycocoevalcap.git
