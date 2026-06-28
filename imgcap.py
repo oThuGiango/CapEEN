@@ -136,6 +136,10 @@ EARLY_STOP_PATIENCE = 2  # Phase 1 và Phase 2 dùng chung giá trị này
 # Resume: nếu checkpoint baseline đã có thì bỏ qua train baseline để tiết kiệm thời gian
 RESUME_BASELINE_FROM_CKPT = True
 
+# Skip baseline test inference/metrics khi đang resume từ checkpoint đã có.
+# Dùng khi baseline đã đánh giá xong ở run trước và muốn đi thẳng sang Early Exit.
+SKIP_BASELINE_EVAL_WHEN_RESUMED = True
+
 # ---------------------------------------------------------------------------
 # DEV MODE – ghi đè tham số để test pipeline trong ~15 phút
 # Bật bằng cách đặt DEV_MODE = True ở đầu file
@@ -214,6 +218,15 @@ def save_training_plot(epoch_rows, value_key, out_path, title):
 def sync_cuda_if_needed():
     if device.type == "cuda":
         torch.cuda.synchronize()
+
+
+def format_seconds(seconds: float) -> str:
+    if not np.isfinite(seconds):
+        return "--:--:--"
+    total = max(0, int(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def write_readme(summary_path, lines):
@@ -665,7 +678,8 @@ inference_timing_csv = os.path.join(RESULTS_DIR, "inference_timing.csv")
 best_valid_loss = float("inf")
 es_counter_base = 0   # đếm epoch liên tiếp không cải thiện
 baseline_ckpt_ready = os.path.exists(os.path.join(BASELINE_CKPT, "config.json"))
-if RESUME_BASELINE_FROM_CKPT and baseline_ckpt_ready:
+baseline_resumed = RESUME_BASELINE_FROM_CKPT and baseline_ckpt_ready
+if baseline_resumed:
     log_message(f"[Baseline] Reusing existing checkpoint at {BASELINE_CKPT}, skip baseline training.")
     best_valid_loss = float("nan")
     BASELINE_EPOCHS = 0
@@ -763,62 +777,72 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
 # =============================================================================
 
 preds = {}
-gts = {}
+gts = {sample_id: item["caption"] for sample_id, item in enumerate(test_samples)}
 baseline_pred_rows = []
 baseline_timing_rows = []
 
-baseline_eval_model = VisionEncoderDecoderModel.from_pretrained(
-    BASELINE_CKPT).to(device)
-baseline_eval_model.eval()
-baseline_eval_tokenizer = AutoTokenizer.from_pretrained(BASELINE_CKPT)
-baseline_eval_processor = AutoImageProcessor.from_pretrained(BASELINE_CKPT)
+if baseline_resumed and SKIP_BASELINE_EVAL_WHEN_RESUMED:
+    log_message("[Baseline] Skip baseline test inference/metrics (resumed checkpoint).")
+    scores = {
+        "BLEU-1": float("nan"),
+        "BLEU-2": float("nan"),
+        "BLEU-3": float("nan"),
+        "BLEU-4": float("nan"),
+        "CIDEr": float("nan"),
+        "METEOR": float("nan"),
+    }
+else:
+    baseline_eval_model = VisionEncoderDecoderModel.from_pretrained(
+        BASELINE_CKPT).to(device)
+    baseline_eval_model.eval()
+    baseline_eval_tokenizer = AutoTokenizer.from_pretrained(BASELINE_CKPT)
+    baseline_eval_processor = AutoImageProcessor.from_pretrained(BASELINE_CKPT)
 
-for sample_id, item in enumerate(tqdm(test_samples, desc="Baseline Test Inference")):
-    image = load_image(item["image_path"])
-    pixel = baseline_eval_processor(
-        image, return_tensors="pt").pixel_values.to(device)
-    with torch.no_grad():
-        sync_cuda_if_needed()
-        infer_start = time.perf_counter()
-        predict = baseline_eval_model.generate(pixel, max_length=MAX_LENGTH)
-        sync_cuda_if_needed()
-        latency_ms = (time.perf_counter() - infer_start) * 1000.0
-    cap_predict = baseline_eval_tokenizer.batch_decode(
-        predict, skip_special_tokens=True)[0]
-    cap_predict = re.sub(r"\s+", " ", cap_predict).strip()
-    output_tokens = int(predict.shape[-1])
+    for sample_id, item in enumerate(tqdm(test_samples, desc="Baseline Test Inference")):
+        image = load_image(item["image_path"])
+        pixel = baseline_eval_processor(
+            image, return_tensors="pt").pixel_values.to(device)
+        with torch.no_grad():
+            sync_cuda_if_needed()
+            infer_start = time.perf_counter()
+            predict = baseline_eval_model.generate(pixel, max_length=MAX_LENGTH)
+            sync_cuda_if_needed()
+            latency_ms = (time.perf_counter() - infer_start) * 1000.0
+        cap_predict = baseline_eval_tokenizer.batch_decode(
+            predict, skip_special_tokens=True)[0]
+        cap_predict = re.sub(r"\s+", " ", cap_predict).strip()
+        output_tokens = int(predict.shape[-1])
 
-    preds[sample_id] = [cap_predict]
-    gts[sample_id] = item["caption"]
+        preds[sample_id] = [cap_predict]
 
-    baseline_pred_rows.append(
-        {
-            "id": sample_id,
-            "image_path": item["image_path"],
-            "prediction": cap_predict,
-            "ground_truth": " || ".join(item["caption"]) if isinstance(item["caption"], list) else str(item["caption"]),
-        }
+        baseline_pred_rows.append(
+            {
+                "id": sample_id,
+                "image_path": item["image_path"],
+                "prediction": cap_predict,
+                "ground_truth": " || ".join(item["caption"]) if isinstance(item["caption"], list) else str(item["caption"]),
+            }
+        )
+        baseline_timing_rows.append(
+            {
+                "model": "baseline",
+                "id": sample_id,
+                "latency_ms": round(latency_ms, 3),
+                "tokens": output_tokens,
+                "ms_per_token": round(latency_ms / max(1, output_tokens), 3),
+                "avg_exit_layer": "",
+            }
+        )
+
+    scores = compute_caption_metrics(preds, gts)
+    log_message("[Baseline] Final test metrics: " +
+                ", ".join([f"{k}={v:.4f}" for k, v in scores.items()]))
+
+    save_dict_to_csv(
+        baseline_metrics_csv,
+        [{"metric": k, "score": v} for k, v in scores.items()],
     )
-    baseline_timing_rows.append(
-        {
-            "model": "baseline",
-            "id": sample_id,
-            "latency_ms": round(latency_ms, 3),
-            "tokens": output_tokens,
-            "ms_per_token": round(latency_ms / max(1, output_tokens), 3),
-            "avg_exit_layer": "",
-        }
-    )
-
-scores = compute_caption_metrics(preds, gts)
-log_message("[Baseline] Final test metrics: " +
-            ", ".join([f"{k}={v:.4f}" for k, v in scores.items()]))
-
-save_dict_to_csv(
-    baseline_metrics_csv,
-    [{"metric": k, "score": v} for k, v in scores.items()],
-)
-save_dict_to_csv(baseline_pred_csv, baseline_pred_rows)
+    save_dict_to_csv(baseline_pred_csv, baseline_pred_rows)
 
 
 # =============================================================================
@@ -876,6 +900,12 @@ os.makedirs(intermediate_head_weights_dir, exist_ok=True)
 for epoch in range(1, num_epochs_exit + 1):
     intermediate_heads.train()
     train_loss_sum = 0.0
+    epoch_start_time = time.perf_counter()
+    total_batches_exit = max(1, len(train_loader_exit))
+
+    log_message(
+        f"[Exit] Epoch {epoch}/{num_epochs_exit} started. total_steps={total_batches_exit}"
+    )
 
     for batch_idx, batch in enumerate(tqdm(train_loader_exit, desc=f"Exit Train E{epoch}"), start=1):
         pixel_values = batch["pixel_values"].to(device, non_blocking=True)
@@ -932,8 +962,14 @@ for epoch in range(1, num_epochs_exit + 1):
         )
 
         if current_step_exit % LOG_EVERY_STEPS == 0:
+            elapsed = time.perf_counter() - epoch_start_time
+            step_rate = batch_idx / max(elapsed, 1e-9)
+            remaining_steps = max(0, total_batches_exit - batch_idx)
+            eta_seconds = remaining_steps / max(step_rate, 1e-9)
+            progress_pct = (batch_idx / total_batches_exit) * 100.0
             log_message(
-                f"[Exit] step={current_step_exit}, epoch={epoch}, batch={batch_idx}, step_loss={step_loss:.6f}")
+                f"[Exit] epoch={epoch}/{num_epochs_exit}, step={batch_idx}/{total_batches_exit} "
+                f"({progress_pct:.1f}%), loss={step_loss:.6f}, eta={format_seconds(eta_seconds)}")
 
     train_loss_epoch = train_loss_sum / max(1, len(train_loader_exit))
 
