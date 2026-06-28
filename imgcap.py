@@ -14,7 +14,6 @@
 #  DEV_MODE = False  → chạy full train cho báo cáo
 # =============================================================================
 
-from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.bleu.bleu import Bleu
 import transformers
@@ -189,9 +188,11 @@ def append_csv_row(file_path, fieldnames, row):
         writer.writerow(row)
     log_message(f"[Info] Appended row to {file_path}.")
 
+
 def save_dict_to_csv(file_path, rows):
     if not rows:
-        log_message(f"[Warning] No rows to save to {file_path}. Skipping CSV write.")
+        log_message(
+            f"[Warning] No rows to save to {file_path}. Skipping CSV write.")
         return
     fieldnames = list(rows[0].keys())
     with open(file_path, "w", newline="", encoding="utf-8") as f:
@@ -488,7 +489,7 @@ optimizer = AdamW(model.parameters(), lr=BASELINE_LR)
 scaler = GradScaler(enabled=device.type == "cuda")
 
 # =============================================================================
-# SECTION 5 – Hàm tính metric: BLEU-1~4 / CIDEr / METEOR
+# SECTION 5 – Hàm tính metric: BLEU-1~4 / CIDEr
 # =============================================================================
 
 
@@ -498,7 +499,7 @@ def compute_caption_metrics(
     verbose: bool = True
 ) -> dict[str, float]:
     """
-    Tính BLEU-1~4, CIDEr, METEOR cho image captioning.
+    Tính BLEU-1~4, CIDEr cho image captioning.
 
     Args:
         predictions  : {image_id: ["predicted caption"]}
@@ -523,22 +524,6 @@ def compute_caption_metrics(
     cider_scorer = Cider()
     cider_score, _ = cider_scorer.compute_score(ground_truths, predictions)
     scores["CIDEr"] = round(cider_score, 4)
-
-    # ---------- METEOR ----------
-    meteor_scorer = None
-    try:
-        meteor_scorer = Meteor()
-        meteor_score, _ = meteor_scorer.compute_score(ground_truths, predictions)
-        scores["METEOR"] = round(meteor_score, 4)
-    except Exception as exc:
-        scores["METEOR"] = float("nan")
-        log_message(f"[Metric] METEOR failed: {exc}")
-    finally:
-        if meteor_scorer is not None and hasattr(meteor_scorer, "meteor_p"):
-            try:
-                meteor_scorer.meteor_p.kill()
-            except Exception:
-                pass
 
     if verbose:
         print("=" * 35)
@@ -686,10 +671,12 @@ inference_timing_csv = os.path.join(RESULTS_DIR, "inference_timing.csv")
 
 best_valid_loss = float("inf")
 es_counter_base = 0   # đếm epoch liên tiếp không cải thiện
-baseline_ckpt_ready = os.path.exists(os.path.join(BASELINE_CKPT, "config.json"))
+baseline_ckpt_ready = os.path.exists(
+    os.path.join(BASELINE_CKPT, "config.json"))
 baseline_resumed = RESUME_BASELINE_FROM_CKPT and baseline_ckpt_ready
 if baseline_resumed:
-    log_message(f"[Baseline] Reusing existing checkpoint at {BASELINE_CKPT}, skip baseline training.")
+    log_message(
+        f"[Baseline] Reusing existing checkpoint at {BASELINE_CKPT}, skip baseline training.")
     best_valid_loss = float("nan")
     BASELINE_EPOCHS = 0
 
@@ -786,19 +773,20 @@ for epoch in range(1, BASELINE_EPOCHS + 1):
 # =============================================================================
 
 preds = {}
-gts = {sample_id: item["caption"] for sample_id, item in enumerate(test_samples)}
+gts = {sample_id: item["caption"]
+       for sample_id, item in enumerate(test_samples)}
 baseline_pred_rows = []
 baseline_timing_rows = []
 
 if baseline_resumed and SKIP_BASELINE_EVAL_WHEN_RESUMED:
-    log_message("[Baseline] Skip baseline test inference/metrics (resumed checkpoint).")
+    log_message(
+        "[Baseline] Skip baseline test inference/metrics (resumed checkpoint).")
     scores = {
         "BLEU-1": float("nan"),
         "BLEU-2": float("nan"),
         "BLEU-3": float("nan"),
         "BLEU-4": float("nan"),
         "CIDEr": float("nan"),
-        "METEOR": float("nan"),
     }
 else:
     baseline_eval_model = VisionEncoderDecoderModel.from_pretrained(
@@ -814,7 +802,8 @@ else:
         with torch.no_grad():
             sync_cuda_if_needed()
             infer_start = time.perf_counter()
-            predict = baseline_eval_model.generate(pixel, max_length=MAX_LENGTH)
+            predict = baseline_eval_model.generate(
+                pixel, max_length=MAX_LENGTH)
             sync_cuda_if_needed()
             latency_ms = (time.perf_counter() - infer_start) * 1000.0
         cap_predict = baseline_eval_tokenizer.batch_decode(
@@ -869,7 +858,8 @@ log_message("[Exit] Teacher model loaded and frozen. Starting KD training...")
 
 tokenizer = AutoTokenizer.from_pretrained(BASELINE_CKPT)
 image_processor = AutoImageProcessor.from_pretrained(BASELINE_CKPT)
-log_message(f"[Exit] Tokenizer and image processor loaded from {BASELINE_CKPT}")
+log_message(
+    f"[Exit] Tokenizer and image processor loaded from {BASELINE_CKPT}")
 num_epochs_exit = EXIT_EPOCHS
 current_step_exit = 0
 
@@ -1057,7 +1047,8 @@ for layer_idx, head in enumerate(intermediate_heads):
     head_path = os.path.join(
         intermediate_head_weights_dir, f"head_layer_{layers_for_exit[layer_idx]}.pt")
     if os.path.exists(head_path):
-        state_dict = torch.load(head_path, map_location=device, weights_only=True)
+        state_dict = torch.load(
+            head_path, map_location=device, weights_only=True)
         head.load_state_dict(state_dict)
     head.to(device)
     head.eval()
