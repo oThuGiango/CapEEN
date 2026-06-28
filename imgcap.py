@@ -138,7 +138,7 @@ RESUME_BASELINE_FROM_CKPT = True
 
 # Skip baseline test inference/metrics khi đang resume từ checkpoint đã có.
 # Dùng khi baseline đã đánh giá xong ở run trước và muốn đi thẳng sang Early Exit.
-SKIP_BASELINE_EVAL_WHEN_RESUMED = True
+SKIP_BASELINE_EVAL_WHEN_RESUMED = False
 
 # ---------------------------------------------------------------------------
 # DEV MODE – ghi đè tham số để test pipeline trong ~15 phút
@@ -187,16 +187,18 @@ def append_csv_row(file_path, fieldnames, row):
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
-
+    print(f"[Info] Appended row to {file_path}.")
 
 def save_dict_to_csv(file_path, rows):
     if not rows:
+        print(f"[Warning] No rows to save to {file_path}. Skipping CSV write.")
         return
     fieldnames = list(rows[0].keys())
     with open(file_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    print(f"[Info] Saved {len(rows)} rows to {file_path}.")
 
 
 def save_training_plot(epoch_rows, value_key, out_path, title):
