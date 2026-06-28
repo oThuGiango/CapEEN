@@ -133,6 +133,9 @@ EXIT_THRESHOLD = 1.5               # ngưỡng aggregated confidence để exit 
 # Tắt bằng cách đặt EARLY_STOP_PATIENCE = 0
 EARLY_STOP_PATIENCE = 2  # Phase 1 và Phase 2 dùng chung giá trị này
 
+# Resume: nếu checkpoint baseline đã có thì bỏ qua train baseline để tiết kiệm thời gian
+RESUME_BASELINE_FROM_CKPT = True
+
 # ---------------------------------------------------------------------------
 # DEV MODE – ghi đè tham số để test pipeline trong ~15 phút
 # Bật bằng cách đặt DEV_MODE = True ở đầu file
@@ -507,9 +510,13 @@ def compute_caption_metrics(
     scores["CIDEr"] = round(cider_score, 4)
 
     # ---------- METEOR ----------
-    meteor_scorer = Meteor()
-    meteor_score, _ = meteor_scorer.compute_score(ground_truths, predictions)
-    scores["METEOR"] = round(meteor_score, 4)
+    try:
+        meteor_scorer = Meteor()
+        meteor_score, _ = meteor_scorer.compute_score(ground_truths, predictions)
+        scores["METEOR"] = round(meteor_score, 4)
+    except Exception as exc:
+        scores["METEOR"] = float("nan")
+        log_message(f"[Metric] METEOR failed: {exc}")
 
     if verbose:
         print("=" * 35)
@@ -657,6 +664,11 @@ inference_timing_csv = os.path.join(RESULTS_DIR, "inference_timing.csv")
 
 best_valid_loss = float("inf")
 es_counter_base = 0   # đếm epoch liên tiếp không cải thiện
+baseline_ckpt_ready = os.path.exists(os.path.join(BASELINE_CKPT, "config.json"))
+if RESUME_BASELINE_FROM_CKPT and baseline_ckpt_ready:
+    log_message(f"[Baseline] Reusing existing checkpoint at {BASELINE_CKPT}, skip baseline training.")
+    best_valid_loss = float("nan")
+    BASELINE_EPOCHS = 0
 
 for epoch in range(1, BASELINE_EPOCHS + 1):
     model.train()
@@ -998,7 +1010,7 @@ for layer_idx, head in enumerate(intermediate_heads):
     head_path = os.path.join(
         intermediate_head_weights_dir, f"head_layer_{layers_for_exit[layer_idx]}.pt")
     if os.path.exists(head_path):
-        state_dict = torch.load(head_path, map_location=device)
+        state_dict = torch.load(head_path, map_location=device, weights_only=True)
         head.load_state_dict(state_dict)
     head.to(device)
     head.eval()
@@ -1102,27 +1114,29 @@ log_message(
 baseline_epoch_rows = []
 exit_epoch_rows = []
 
-with open(baseline_epoch_csv, "r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    for r in reader:
-        baseline_epoch_rows.append(
-            {
-                "epoch": int(r["epoch"]),
-                "train_loss": float(r["train_loss"]),
-                "valid_loss": float(r["valid_loss"]),
-            }
-        )
+if os.path.exists(baseline_epoch_csv):
+    with open(baseline_epoch_csv, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            baseline_epoch_rows.append(
+                {
+                    "epoch": int(r["epoch"]),
+                    "train_loss": float(r["train_loss"]),
+                    "valid_loss": float(r["valid_loss"]),
+                }
+            )
 
-with open(exit_epoch_csv, "r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    for r in reader:
-        exit_epoch_rows.append(
-            {
-                "epoch": int(r["epoch"]),
-                "train_loss": float(r["train_loss"]),
-                "valid_loss": float(r["valid_loss"]),
-            }
-        )
+if os.path.exists(exit_epoch_csv):
+    with open(exit_epoch_csv, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            exit_epoch_rows.append(
+                {
+                    "epoch": int(r["epoch"]),
+                    "train_loss": float(r["train_loss"]),
+                    "valid_loss": float(r["valid_loss"]),
+                }
+            )
 
 save_training_plot(
     baseline_epoch_rows,
