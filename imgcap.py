@@ -187,18 +187,18 @@ def append_csv_row(file_path, fieldnames, row):
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
-    print(f"[Info] Appended row to {file_path}.")
+    log_message(f"[Info] Appended row to {file_path}.")
 
 def save_dict_to_csv(file_path, rows):
     if not rows:
-        print(f"[Warning] No rows to save to {file_path}. Skipping CSV write.")
+        log_message(f"[Warning] No rows to save to {file_path}. Skipping CSV write.")
         return
     fieldnames = list(rows[0].keys())
     with open(file_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    print(f"[Info] Saved {len(rows)} rows to {file_path}.")
+    log_message(f"[Info] Saved {len(rows)} rows to {file_path}.")
 
 
 def save_training_plot(epoch_rows, value_key, out_path, title):
@@ -525,6 +525,7 @@ def compute_caption_metrics(
     scores["CIDEr"] = round(cider_score, 4)
 
     # ---------- METEOR ----------
+    meteor_scorer = None
     try:
         meteor_scorer = Meteor()
         meteor_score, _ = meteor_scorer.compute_score(ground_truths, predictions)
@@ -532,6 +533,12 @@ def compute_caption_metrics(
     except Exception as exc:
         scores["METEOR"] = float("nan")
         log_message(f"[Metric] METEOR failed: {exc}")
+    finally:
+        if meteor_scorer is not None and hasattr(meteor_scorer, "meteor_p"):
+            try:
+                meteor_scorer.meteor_p.kill()
+            except Exception:
+                pass
 
     if verbose:
         print("=" * 35)
@@ -851,16 +858,18 @@ else:
 # SECTION 9 – Phase 2: Train Early Exit heads (Knowledge Distillation)
 # =============================================================================
 
+log_message(f"[Exit] Training Early Exit")
 # Load best baseline checkpoint để làm teacher, freeze toàn bộ tham số
 best_model = VisionEncoderDecoderModel.from_pretrained(
     BASELINE_CKPT).to(device)
 best_model.eval()
 for p in best_model.parameters():
     p.requires_grad = False
+log_message("[Exit] Teacher model loaded and frozen. Starting KD training...")
 
 tokenizer = AutoTokenizer.from_pretrained(BASELINE_CKPT)
 image_processor = AutoImageProcessor.from_pretrained(BASELINE_CKPT)
-
+log_message(f"[Exit] Tokenizer and image processor loaded from {BASELINE_CKPT}")
 num_epochs_exit = EXIT_EPOCHS
 current_step_exit = 0
 
@@ -1042,7 +1051,7 @@ for epoch in range(1, num_epochs_exit + 1):
 # =============================================================================
 # SECTION 10 – Inference Early Exit trên test set
 # =============================================================================
-
+log_message("[Exit] Start test inference with early exit heads.")
 # Load best exit head weights
 for layer_idx, head in enumerate(intermediate_heads):
     head_path = os.path.join(
