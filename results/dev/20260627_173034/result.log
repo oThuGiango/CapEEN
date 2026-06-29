@@ -1,0 +1,50 @@
+[2026-06-27 17:30:37] [Data] train_images=67, train_samples=200, val_images=17, val_samples=50, test_images=30, test_samples=30, test_refs=151
+[2026-06-27 17:30:42] Run started. Results dir: results/dev/20260627_173034
+[2026-06-27 17:30:42] Run mode: dev. Baseline checkpoint: ./image-captioning-dev. Exit checkpoint dir: ./checkpoint/intermediate_head_weights_dev
+[2026-06-27 17:30:45] [Baseline] step=5, epoch=1, batch=5, step_loss=5.095600
+[2026-06-27 17:30:48] [Baseline] step=10, epoch=1, batch=10, step_loss=4.492283
+[2026-06-27 17:30:51] [Baseline] step=15, epoch=1, batch=15, step_loss=4.457453
+[2026-06-27 17:30:54] [Baseline] step=20, epoch=1, batch=20, step_loss=4.570109
+[2026-06-27 17:30:56] [Baseline] step=25, epoch=1, batch=25, step_loss=3.725112
+[2026-06-27 17:30:59] [Baseline] step=30, epoch=1, batch=30, step_loss=4.245755
+[2026-06-27 17:31:02] [Baseline] step=35, epoch=1, batch=35, step_loss=2.811176
+[2026-06-27 17:31:04] [Baseline] step=40, epoch=1, batch=40, step_loss=3.442022
+[2026-06-27 17:31:07] [Baseline] step=45, epoch=1, batch=45, step_loss=3.520436
+[2026-06-27 17:31:10] [Baseline] step=50, epoch=1, batch=50, step_loss=3.758893
+[2026-06-27 17:31:13] [Baseline] step=55, epoch=1, batch=55, step_loss=3.061897
+[2026-06-27 17:31:15] [Baseline] step=60, epoch=1, batch=60, step_loss=2.794635
+[2026-06-27 17:31:18] [Baseline] step=65, epoch=1, batch=65, step_loss=3.388155
+[2026-06-27 17:31:21] [Baseline] step=70, epoch=1, batch=70, step_loss=2.737665
+[2026-06-27 17:31:23] [Baseline] step=75, epoch=1, batch=75, step_loss=4.221959
+[2026-06-27 17:31:26] [Baseline] step=80, epoch=1, batch=80, step_loss=2.209845
+[2026-06-27 17:31:29] [Baseline] step=85, epoch=1, batch=85, step_loss=3.039337
+[2026-06-27 17:31:32] [Baseline] step=90, epoch=1, batch=90, step_loss=4.450322
+[2026-06-27 17:31:34] [Baseline] step=95, epoch=1, batch=95, step_loss=3.181427
+[2026-06-27 17:31:37] [Baseline] step=100, epoch=1, batch=100, step_loss=3.143020
+[2026-06-27 17:31:41] [Baseline][Epoch 1] train_loss=3.588140, valid_loss=3.410998, best_valid_loss=inf
+[2026-06-27 17:31:43] [Baseline] New best model saved  valid_loss=3.410998
+[2026-06-27 17:32:48] [Baseline] Final test metrics: BLEU-1=0.4795, BLEU-2=0.2870, BLEU-3=0.1416, BLEU-4=0.0806, CIDEr=0.1556, METEOR=0.1273
+[2026-06-27 17:33:09] [Exit] step=5, epoch=1, batch=5, step_loss=16.956799
+[2026-06-27 17:33:11] [Exit] step=10, epoch=1, batch=10, step_loss=19.072868
+[2026-06-27 17:33:14] [Exit] step=15, epoch=1, batch=15, step_loss=18.948534
+[2026-06-27 17:33:17] [Exit] step=20, epoch=1, batch=20, step_loss=17.847509
+[2026-06-27 17:33:20] [Exit] step=25, epoch=1, batch=25, step_loss=17.562864
+[2026-06-27 17:33:23] [Exit] step=30, epoch=1, batch=30, step_loss=15.723370
+[2026-06-27 17:33:26] [Exit] step=35, epoch=1, batch=35, step_loss=14.337811
+[2026-06-27 17:33:29] [Exit] step=40, epoch=1, batch=40, step_loss=12.516705
+[2026-06-27 17:33:32] [Exit] step=45, epoch=1, batch=45, step_loss=14.498764
+[2026-06-27 17:33:35] [Exit] step=50, epoch=1, batch=50, step_loss=14.438452
+[2026-06-27 17:33:38] [Exit] step=55, epoch=1, batch=55, step_loss=12.807196
+[2026-06-27 17:33:40] [Exit] step=60, epoch=1, batch=60, step_loss=11.826789
+[2026-06-27 17:33:43] [Exit] step=65, epoch=1, batch=65, step_loss=12.861933
+[2026-06-27 17:33:46] [Exit] step=70, epoch=1, batch=70, step_loss=13.604143
+[2026-06-27 17:33:49] [Exit] step=75, epoch=1, batch=75, step_loss=11.553280
+[2026-06-27 17:33:52] [Exit] step=80, epoch=1, batch=80, step_loss=12.723282
+[2026-06-27 17:33:55] [Exit] step=85, epoch=1, batch=85, step_loss=10.710938
+[2026-06-27 17:33:58] [Exit] step=90, epoch=1, batch=90, step_loss=11.093298
+[2026-06-27 17:34:01] [Exit] step=95, epoch=1, batch=95, step_loss=11.934919
+[2026-06-27 17:34:04] [Exit] step=100, epoch=1, batch=100, step_loss=10.730270
+[2026-06-27 17:34:13] [Exit][Epoch 1] train_loss=14.404565, valid_loss=13.354266, best_valid_loss=13.354266
+[2026-06-27 17:36:25] [Exit] Final test metrics: BLEU-1=0.4795, BLEU-2=0.2870, BLEU-3=0.1416, BLEU-4=0.0806, CIDEr=0.1556, METEOR=0.1273
+[2026-06-27 17:36:25] [Timing] baseline_avg_latency_ms=1410.324, exit_avg_latency_ms=3951.275, speedup=0.357x, avg_exit_layer=12.000
+[2026-06-27 17:36:26] All report artifacts generated successfully.
