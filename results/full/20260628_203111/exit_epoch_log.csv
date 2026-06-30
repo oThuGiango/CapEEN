@@ -1,3 +1,0 @@
-epoch,train_loss,valid_loss,best_valid_loss_so_far,saved_checkpoint
-1,2.08294,2.576287,2.576287,1
-2,1.477972,2.458338,2.458338,1

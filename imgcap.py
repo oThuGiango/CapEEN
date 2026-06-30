@@ -547,8 +547,10 @@ def get_decoder_layer_states(decoder_hidden_states, expected_layers):
 
 def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_token_id, eos_token_id, max_length, threshold):
     """
-    Early exit thật: chạy decoder layer-by-layer và dừng ngay khi đạt ngưỡng.
-    Không chạy full decoder khi đã đủ tự tin.
+    Early exit: chạy decoder layer-by-layer và dừng ngay khi đạt ngưỡng.
+    Dùng KV cache cho các decoder layer đã chạy. Nếu một token trước exit ở
+    layer nông nhưng token sau cần đi sâu hơn, layer sâu sẽ "catch up" phần
+    prefix còn thiếu trước khi xử lý token hiện tại.
     """
     transformer = model_ved.decoder.transformer
     inter_heads = list(inter_heads)
@@ -571,24 +573,27 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
     encoder_attention_mask = transformer.invert_attention_mask(
         encoder_attention_mask)
 
+    def append_hidden(cache, new_hidden):
+        if cache is None:
+            return new_hidden
+        return torch.cat([cache, new_hidden], dim=1)
+
     generated = [start_token_id]
     layer_trace = []
+    past_key_values = [None] * num_layers
+    embedding_cache = None
+    layer_hidden_cache = [None] * num_layers
 
     for _ in range(max_length):
-        input_ids = torch.tensor([generated], device=pixel_values.device)
-        seq_len = input_ids.size(1)
-        pos_ids = torch.arange(0, seq_len, dtype=torch.long,
-                               device=pixel_values.device).unsqueeze(0)
+        current_pos = len(generated) - 1
+        input_ids = torch.tensor([[generated[-1]]], device=pixel_values.device)
+        pos_ids = torch.tensor([[current_pos]], dtype=torch.long,
+                               device=pixel_values.device)
 
-        dec_mask = torch.ones((1, seq_len), dtype=torch.long,
-                              device=pixel_values.device)
-        dec_mask = dec_mask[:, None, None, :].to(
-            dtype=transformer.wte.weight.dtype)
-        dec_mask = (1.0 - dec_mask) * \
-            torch.finfo(transformer.wte.weight.dtype).min
-
-        hidden_states = transformer.wte(input_ids) + transformer.wpe(pos_ids)
-        hidden_states = transformer.drop(hidden_states)
+        token_hidden = transformer.wte(input_ids) + transformer.wpe(pos_ids)
+        token_hidden = transformer.drop(token_hidden)
+        embedding_cache = append_hidden(embedding_cache, token_hidden)
+        available_len = embedding_cache.size(1)
 
         prev_token = None
         agg_conf = 0.0
@@ -596,21 +601,40 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
         chosen_layer = None
 
         for layer_idx in range(num_layers):
-            block = transformer.h[layer_idx]
-            block_outputs = block(
-                hidden_states,
-                layer_past=None,
-                attention_mask=dec_mask,
-                head_mask=None,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                use_cache=False,
-                output_attentions=False,
-            )
-            hidden_states = block_outputs[0]
+            prev_layer_cache = embedding_cache if layer_idx == 0 else layer_hidden_cache[layer_idx - 1]
+            processed_len = 0 if layer_hidden_cache[layer_idx] is None else layer_hidden_cache[layer_idx].size(1)
 
+            # With early exit, deeper layers may not have processed older tokens.
+            # Process only the missing suffix so this layer's KV cache is valid
+            # through the current input token.
+            hidden_to_process = prev_layer_cache[:, processed_len:available_len, :]
+            if hidden_to_process.size(1) > 0:
+                attention_len = processed_len + hidden_to_process.size(1)
+                dec_mask = torch.ones((1, attention_len), dtype=torch.long,
+                                      device=pixel_values.device)
+                dec_mask = dec_mask[:, None, None, :].to(
+                    dtype=transformer.wte.weight.dtype)
+                dec_mask = (1.0 - dec_mask) * \
+                    torch.finfo(transformer.wte.weight.dtype).min
+
+                block = transformer.h[layer_idx]
+                block_outputs = block(
+                    hidden_to_process,
+                    layer_past=past_key_values[layer_idx],
+                    attention_mask=dec_mask,
+                    head_mask=None,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    use_cache=True,
+                    output_attentions=False,
+                )
+                past_key_values[layer_idx] = block_outputs[1]
+                layer_hidden_cache[layer_idx] = append_hidden(
+                    layer_hidden_cache[layer_idx], block_outputs[0])
+
+            current_hidden = layer_hidden_cache[layer_idx][:, -1:, :]
             head_hidden_states = transformer.ln_f(
-                hidden_states) if layer_idx == num_layers - 1 else hidden_states
+                current_hidden) if layer_idx == num_layers - 1 else current_hidden
             logits = inter_heads[layer_idx](head_hidden_states)
             token = logits[:, -1, :].argmax(-1).item()
             conf = torch.softmax(
@@ -631,7 +655,7 @@ def greedy_decode_true_early_exit(model_ved, inter_heads, pixel_values, start_to
 
         # Không đủ ngưỡng: fallback về final LM head của baseline.
         if chosen_token is None:
-            final_hidden = transformer.ln_f(hidden_states)
+            final_hidden = transformer.ln_f(layer_hidden_cache[-1][:, -1:, :])
             final_logits = model_ved.decoder.lm_head(final_hidden)
             chosen_token = final_logits[:, -1, :].argmax(-1).item()
             chosen_layer = num_layers

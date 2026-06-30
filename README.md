@@ -60,23 +60,21 @@ checking starts again from layer 0 and may run up to layer 11 if needed. If no
 exit head reaches the threshold, the script falls back to the baseline decoder
 final LM head.
 
-Knowledge distillation and cache are separate:
+Knowledge distillation and KV cache are separate:
 
 - Knowledge distillation happens during Phase 2 training. Exit heads learn from
   ground-truth tokens and the teacher model final logits.
-- Early-exit inference currently does not use KV cache. Each token recomputes
-  the current generated prefix so every decoder layer sees a consistent
-  sequence even when the previous token exited early.
+- Early-exit inference uses decoder-layer KV cache. Because early exit can skip deeper layers for earlier tokens, a deeper layer may be missing part of the prefix when a later token needs that layer. In that case the code performs a small catch-up pass only for the missing suffix, then continues from cache.
 
 ## Current Code Configuration
 
 Edit these values near the top of `imgcap.py` before running:
 
 ```python
-DATASET_ROOT = "dataset"
+DATASET_ROOT = "/mnt/usb/coco2014"
 BASELINE_CKPT_BASE = "./image-captioning"
 EXIT_CKPT_DIR_BASE = "./checkpoint/intermediate_head_weights"
-DEV_MODE = True
+DEV_MODE = False
 ```
 
 Mode-specific paths are derived automatically:
@@ -98,21 +96,8 @@ DEV_MODE=False:
 The current code uses **COCO train2014 images** for training and
 **COCO val2017 images** for validation/testing.
 Annotations are expected in a top-level `annotations/` folder, not inside
-`dataset/`.
+`DATASET_ROOT`.
 
-Expected folder layout:
-
-```text
-.
-├── annotations/
-│   ├── captions_train2014.json
-│   └── captions_val2017.json
-└── dataset/
-    ├── train2014/
-    │   └── COCO_train2014_*.jpg
-    └── val2017/
-        └── COCO_val2017_*.jpg
-```
 
 Relevant code:
 
@@ -129,9 +114,9 @@ Split behavior:
 
 | Split | Source | Approx images | Note |
 |-------|--------|---------------|------|
-| Train | `dataset/train2014` | ~83k | Uses 3 captions/image, every `(image, caption)` pair is one training sample |
-| Val | `dataset/val2017` | ~4.5k | Uses 3 captions/image from 90% of shuffled val2017 image ids |
-| Test | `dataset/val2017` | ~0.5k | Keeps all available captions, usually 5 references/image |
+| Train | `DATASET_ROOT/train2014` | up to 50k | Uses 3 captions/image, every `(image, caption)` pair is one training sample |
+| Val | `DATASET_ROOT/val2017` | ~4.5k | Uses 3 captions/image from 90% of shuffled val2017 image ids |
+| Test | `DATASET_ROOT/val2017` | ~0.5k | Keeps all available captions, usually 5 references/image |
 
 `DEV_MODE=True` truncates this to:
 
@@ -202,15 +187,16 @@ Recommended workflow:
 | `EXIT_EPOCHS` | 2 | 1 |
 | `BASELINE_BATCH` | 4 | 2 |
 | `EXIT_BATCH` | 4 | 2 |
-| `BASELINE_LR` | `1e-4` | same |
+| `BASELINE_LR` | `5e-5` | same |
 | `EXIT_LR` | `1e-4` | same |
 | `EXIT_WARMUP_STEPS` | 1000 | 10 |
 | `MAX_LENGTH` | 32 | same |
+| `FULL_TRAIN_IMAGE_LIMIT` | 50000 | not used |
 | `CAPTIONS_PER_IMAGE_TRAIN` | 3 | same |
 | `CAPTIONS_PER_IMAGE_VAL` | 3 | same |
 | `LAYERS_FOR_EXIT` | `0..11` | same |
 | `EXIT_THRESHOLD` | 1.5 | same |
-| `EARLY_STOP_PATIENCE` | 3 | 0 |
+| `EARLY_STOP_PATIENCE` | 2 | 0 |
 
 ## Outputs
 
